@@ -15,6 +15,7 @@ This repository contains a MetaTrader 5 Expert Advisor implementing a modular Bi
 - Optional Market Facilitation Index filter
 - ATR/fractal stop-loss selection and reward-risk take-profit
 - H1 trading timeframe, optional D1 trend filter, and optional M15 confirmation
+- Killzone entry filter that trades only the enabled Asia, London, and New York sessions by default
 
 ## Entry conditions
 
@@ -29,7 +30,7 @@ By default the EA now uses a less passive balanced configuration. A buy entry re
 7. H1 AO is rising by default; set `InpRequireAOSign=true` to also require AO above zero, or `InpRequireAOSlope=false` to disable the slope check.
 8. M15 AO is rising only when `InpRequireConfirmAO=true`.
 9. The optional MFI filter passes when `InpUseMfiFilter=true`.
-10. Risk sizing can build a valid order plan, spread is not above `InpMaxSpreadPoints`, the optional time filters allow the bar, and the position manager allows exposure (`InpMaxOpenPositions=1`, no pyramiding by default).
+10. Risk sizing can build a valid order plan, spread is not above `InpMaxSpreadPoints`, the enabled killzones/time filters allow the bar, and the position manager allows exposure (`InpMaxOpenPositions=1`, no pyramiding by default).
 
 A sell entry mirrors the buy logic:
 
@@ -39,7 +40,7 @@ A sell entry mirrors the buy logic:
 4. A confirmed bearish fractal exists within the lookback; its placement below the H1 Teeth/Lips area is required only when `InpRequireFractalOutsideAlligator=true`.
 5. H1 AO is falling by default; AO below zero is required only when `InpRequireAOSign=true`.
 6. M15 AO is falling only when `InpRequireConfirmAO=true`.
-7. MFI, risk, spread, time, and exposure checks pass.
+7. MFI, risk, spread, killzone/time, and exposure checks pass.
 
 
 ## Position management
@@ -52,7 +53,8 @@ The EA now includes a dedicated position-management layer to reduce repeated blo
 - `InpCloseOnOppositeSignal=true` closes an existing opposite EA position when a new Plan A signal appears.
 - `InpReverseOnOppositeSignal=false` makes that opposite-signal close a flat exit by default; set it to `true` to close and immediately attempt a reverse entry.
 - `InpUseAlligatorTrailingStop=true` trails stops toward the Alligator Teeth with `InpTrailingBufferPoints`.
-- `InpUseTimeFilter`, `InpTradeStartHour`, `InpTradeEndHour`, `InpAvoidFridayAfterHour`, and `InpFridayCutoffHour` can be used to avoid unwanted sessions or late-Friday entries.
+- `InpUseKillzones=true` limits new entries to the enabled Asia (`InpAsiaStartHour`-`InpAsiaEndHour`), London (`InpLondonStartHour`-`InpLondonEndHour`), and New York (`InpNewYorkStartHour`-`InpNewYorkEndHour`) killzones. Hours are evaluated in broker/server time and use an inclusive start with an exclusive end.
+- `InpUseTimeFilter`, `InpTradeStartHour`, `InpTradeEndHour`, `InpAvoidFridayAfterHour`, and `InpFridayCutoffHour` can further avoid unwanted sessions or late-Friday entries.
 
 ## CSV decision log
 
@@ -79,7 +81,7 @@ The most common reasons for too few trades are:
 - the fractal filter remains confirmed 5-bar fractals only, and becomes stricter if `InpRequireFractalOutsideAlligator=true`;
 - AO can be configured from slope-only to sign-and-slope H1 confirmation plus optional M15 AO confirmation;
 - `InpTradeOnNewBarOnly=true` means checks happen only once per H1 bar by default;
-- spread, risk, minimum stop distance, time filters, or position exposure limits can block execution after a signal.
+- spread, risk, minimum stop distance, killzone/time filters, or position exposure limits can block execution after a signal.
 
 Use the CSV `NO_ENTRY` rows to count which exact filter fails most often for the tested symbol and period.
 
@@ -99,11 +101,12 @@ Recommended inputs to optimize in the MT5 Strategy Tester:
 - `InpRewardRisk`
 - `InpStopBufferPoints` and `InpMinStopPoints`
 - Timeframe inputs for symbol-specific behavior
+- `InpUseKillzones`, individual killzone toggles, and killzone start/end hours
 
 ## Improvement ideas
 
 - Add an ADX or Bollinger Band width filter to avoid flat markets.
 - Adapt `InpATRMultiplier` by volatility regime.
 - Require breakout beyond the confirming fractal before market entry.
-- Add session/time-of-day filters and economic news blackout windows.
+- Add economic news blackout windows around the killzone/session filter.
 - Train a lightweight ML classifier on AO slope, Alligator gaps, ATR percentile, and fractal age to reject low-quality signals.

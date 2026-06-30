@@ -21,6 +21,16 @@ input int             InpSlippagePoints       = 10;
 input bool            InpUseTimeFilter        = false;
 input int             InpTradeStartHour       = 7;
 input int             InpTradeEndHour         = 20;
+input bool            InpUseKillzones         = true;
+input bool            InpTradeAsiaKillzone    = true;
+input int             InpAsiaStartHour        = 0;
+input int             InpAsiaEndHour          = 6;
+input bool            InpTradeLondonKillzone  = true;
+input int             InpLondonStartHour      = 7;
+input int             InpLondonEndHour        = 10;
+input bool            InpTradeNewYorkKillzone = true;
+input int             InpNewYorkStartHour     = 13;
+input int             InpNewYorkEndHour       = 16;
 input bool            InpAvoidFridayAfterHour = true;
 input int             InpFridayCutoffHour     = 18;
 
@@ -253,22 +263,42 @@ string BoolText(const bool value)
    return (value ? "yes" : "no");
 }
 
+bool IsHourInRange(const int hour, const int start_hour, const int end_hour)
+{
+   return (start_hour <= end_hour
+           ? (hour >= start_hour && hour < end_hour)
+           : (hour >= start_hour || hour < end_hour));
+}
+
 bool IsTradingTimeAllowed(string &reason)
 {
    reason = "";
-   if(!InpUseTimeFilter && !InpAvoidFridayAfterHour)
+   if(!InpUseTimeFilter && !InpUseKillzones && !InpAvoidFridayAfterHour)
       return true;
 
    MqlDateTime now;
    TimeToStruct(TimeCurrent(), now);
    if(InpUseTimeFilter)
    {
-      const bool in_session = (InpTradeStartHour <= InpTradeEndHour
-                               ? (now.hour >= InpTradeStartHour && now.hour < InpTradeEndHour)
-                               : (now.hour >= InpTradeStartHour || now.hour < InpTradeEndHour));
+      const bool in_session = IsHourInRange(now.hour, InpTradeStartHour, InpTradeEndHour);
       if(!in_session)
       {
          reason = StringFormat("time filter blocked entry: hour=%d session=%02d-%02d", now.hour, InpTradeStartHour, InpTradeEndHour);
+         return false;
+      }
+   }
+   if(InpUseKillzones)
+   {
+      const bool in_asia = (InpTradeAsiaKillzone && IsHourInRange(now.hour, InpAsiaStartHour, InpAsiaEndHour));
+      const bool in_london = (InpTradeLondonKillzone && IsHourInRange(now.hour, InpLondonStartHour, InpLondonEndHour));
+      const bool in_new_york = (InpTradeNewYorkKillzone && IsHourInRange(now.hour, InpNewYorkStartHour, InpNewYorkEndHour));
+      if(!in_asia && !in_london && !in_new_york)
+      {
+         reason = StringFormat("killzone filter blocked entry: hour=%d Asia=%s(%02d-%02d) London=%s(%02d-%02d) NewYork=%s(%02d-%02d)",
+                               now.hour,
+                               BoolText(InpTradeAsiaKillzone), InpAsiaStartHour, InpAsiaEndHour,
+                               BoolText(InpTradeLondonKillzone), InpLondonStartHour, InpLondonEndHour,
+                               BoolText(InpTradeNewYorkKillzone), InpNewYorkStartHour, InpNewYorkEndHour);
          return false;
       }
    }
