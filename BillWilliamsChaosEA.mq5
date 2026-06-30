@@ -47,6 +47,7 @@ input int             InpMinStopPoints        = 100;
 input group "Logging"
 input bool            InpEnableCsvLog         = true;
 input string          InpLogFileName          = "BillWilliamsChaosEA_trades.csv";
+input bool            InpLogEveryDecision     = true;
 
 //----------------------------- Types -------------------------------
 enum ENUM_SIGNAL_DIRECTION { SIGNAL_NONE = 0, SIGNAL_BUY = 1, SIGNAL_SELL = -1 };
@@ -89,6 +90,7 @@ struct SignalContext
    double ao_previous;
    FractalSignal fractal;
    bool mfi_ok;
+   string diagnostics;
 };
 
 //--------------------------- Indicator Engine ----------------------
@@ -220,6 +222,11 @@ public:
    }
 };
 
+string BoolText(const bool value)
+{
+   return (value ? "yes" : "no");
+}
+
 //----------------------------- Logger ------------------------------
 class CBacktestLogger
 {
@@ -239,7 +246,7 @@ public:
          return;
       }
       if(FileSize(m_handle) == 0)
-         FileWrite(m_handle, "time", "symbol", "event", "direction", "reason", "ao", "jaw", "teeth", "lips", "fractal_price", "fractal_time");
+         FileWrite(m_handle, "time", "symbol", "event", "direction", "reason", "diagnostics", "ao", "ao_previous", "jaw", "teeth", "lips", "trend_jaw", "trend_teeth", "trend_lips", "fractal_price", "fractal_time", "fractal_shift");
       FileSeek(m_handle, 0, SEEK_END);
    }
 
@@ -247,6 +254,36 @@ public:
    {
       if(m_handle != INVALID_HANDLE)
          FileClose(m_handle);
+   }
+
+
+   void LogDeal(const ulong deal_ticket) const
+   {
+      if(m_handle == INVALID_HANDLE || !HistoryDealSelect(deal_ticket))
+         return;
+      if(HistoryDealGetString(deal_ticket, DEAL_SYMBOL) != _Symbol ||
+         HistoryDealGetInteger(deal_ticket, DEAL_MAGIC) != (long)InpMagicNumber)
+         return;
+
+      const ENUM_DEAL_TYPE deal_type = (ENUM_DEAL_TYPE)HistoryDealGetInteger(deal_ticket, DEAL_TYPE);
+      if(deal_type != DEAL_TYPE_BUY && deal_type != DEAL_TYPE_SELL)
+         return;
+
+      const ENUM_DEAL_ENTRY deal_entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal_ticket, DEAL_ENTRY);
+      const string direction = (deal_type == DEAL_TYPE_BUY ? "BUY" : "SELL");
+      const string reason = StringFormat("Executed deal: entry=%s volume=%s price=%s profit=%s comment=%s",
+                                         EnumToString(deal_entry),
+                                         DoubleToString(HistoryDealGetDouble(deal_ticket, DEAL_VOLUME), 2),
+                                         DoubleToString(HistoryDealGetDouble(deal_ticket, DEAL_PRICE), _Digits),
+                                         DoubleToString(HistoryDealGetDouble(deal_ticket, DEAL_PROFIT), 2),
+                                         HistoryDealGetString(deal_ticket, DEAL_COMMENT));
+      const string diagnostics = StringFormat("deal=%I64u order=%I64u position=%I64u",
+                                              deal_ticket,
+                                              HistoryDealGetInteger(deal_ticket, DEAL_ORDER),
+                                              HistoryDealGetInteger(deal_ticket, DEAL_POSITION_ID));
+      FileWrite(m_handle, TimeToString((datetime)HistoryDealGetInteger(deal_ticket, DEAL_TIME), TIME_DATE|TIME_SECONDS),
+                _Symbol, "DEAL_EXECUTED", direction, reason, diagnostics, "", "", "", "", "", "", "", "", "", "", "");
+      FileFlush(m_handle);
    }
 
    void LogSignal(const string event_name, const SignalContext &ctx) const
@@ -260,9 +297,11 @@ public:
       if(m_handle != INVALID_HANDLE)
       {
          FileWrite(m_handle, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), _Symbol, event_name, dir,
-                   ctx.reason, DoubleToString(ctx.ao_current, _Digits), DoubleToString(ctx.main_alligator.jaw, _Digits),
-                   DoubleToString(ctx.main_alligator.teeth, _Digits), DoubleToString(ctx.main_alligator.lips, _Digits),
-                   DoubleToString(ctx.fractal.price, _Digits), TimeToString(ctx.fractal.time, TIME_DATE|TIME_SECONDS));
+                   ctx.reason, ctx.diagnostics, DoubleToString(ctx.ao_current, _Digits), DoubleToString(ctx.ao_previous, _Digits),
+                   DoubleToString(ctx.main_alligator.jaw, _Digits), DoubleToString(ctx.main_alligator.teeth, _Digits),
+                   DoubleToString(ctx.main_alligator.lips, _Digits), DoubleToString(ctx.trend_alligator.jaw, _Digits),
+                   DoubleToString(ctx.trend_alligator.teeth, _Digits), DoubleToString(ctx.trend_alligator.lips, _Digits),
+                   DoubleToString(ctx.fractal.price, _Digits), TimeToString(ctx.fractal.time, TIME_DATE|TIME_SECONDS), ctx.fractal.shift);
          FileFlush(m_handle);
       }
    }
@@ -288,6 +327,7 @@ public:
       ctx.fractal.price = 0.0;
       ctx.fractal.shift = 0;
       ctx.mfi_ok = false;
+      ctx.diagnostics = "";
       ctx.main_alligator = m_ind.GetAlligator(InpTradeTimeframe, 1);
       ctx.trend_alligator = m_ind.GetAlligator(InpTrendTimeframe, 1);
       ctx.ao_current = m_ind.GetAO(InpTradeTimeframe, 1);
@@ -299,11 +339,26 @@ public:
       const double confirm_ao = m_ind.GetAO(InpConfirmTimeframe, 1);
       const double confirm_ao_prev = m_ind.GetAO(InpConfirmTimeframe, 2);
 
+      const bool buy_mfi_ok = m_ind.MfiFilterOk(InpTradeTimeframe, true);
+      const bool sell_mfi_ok = m_ind.MfiFilterOk(InpTradeTimeframe, false);
+      const bool buy_fractal_ok = (bull.found && bull.price > MathMax(ctx.main_alligator.teeth, ctx.main_alligator.lips));
+      const bool sell_fractal_ok = (bear.found && bear.price < MathMin(ctx.main_alligator.teeth, ctx.main_alligator.lips));
+      const bool gap_ok = (ctx.main_alligator.gap_points >= InpMinAlligatorGapPts);
+      const bool buy_ao_ok = (ctx.ao_current > 0.0 && ctx.ao_current > ctx.ao_previous && confirm_ao > confirm_ao_prev);
+      const bool sell_ao_ok = (ctx.ao_current < 0.0 && ctx.ao_current < ctx.ao_previous && confirm_ao < confirm_ao_prev);
+
+      ctx.diagnostics = StringFormat("BUY checks: main_up=%s trend_up=%s confirm_up=%s price_above=%s gap_ok=%s(%.1f/%d) fractal_ok=%s(found=%s price=%s shift=%d) ao_ok=%s(ao=%s prev=%s confirm_ao=%s confirm_prev=%s) mfi_ok=%s | SELL checks: main_down=%s trend_down=%s confirm_down=%s price_below=%s gap_ok=%s fractal_ok=%s(found=%s price=%s shift=%d) ao_ok=%s mfi_ok=%s",
+                                     BoolText(ctx.main_alligator.aligned_up), BoolText(ctx.trend_alligator.aligned_up), BoolText(confirm.aligned_up),
+                                     BoolText(ctx.main_alligator.price_above), BoolText(gap_ok), ctx.main_alligator.gap_points, InpMinAlligatorGapPts,
+                                     BoolText(buy_fractal_ok), BoolText(bull.found), DoubleToString(bull.price, _Digits), bull.shift,
+                                     BoolText(buy_ao_ok), DoubleToString(ctx.ao_current, _Digits), DoubleToString(ctx.ao_previous, _Digits),
+                                     DoubleToString(confirm_ao, _Digits), DoubleToString(confirm_ao_prev, _Digits), BoolText(buy_mfi_ok),
+                                     BoolText(ctx.main_alligator.aligned_down), BoolText(ctx.trend_alligator.aligned_down), BoolText(confirm.aligned_down),
+                                     BoolText(ctx.main_alligator.price_below), BoolText(gap_ok), BoolText(sell_fractal_ok), BoolText(bear.found),
+                                     DoubleToString(bear.price, _Digits), bear.shift, BoolText(sell_ao_ok), BoolText(sell_mfi_ok));
+
       if(ctx.main_alligator.aligned_up && ctx.trend_alligator.aligned_up && confirm.aligned_up &&
-         ctx.main_alligator.price_above && ctx.main_alligator.gap_points >= InpMinAlligatorGapPts &&
-         bull.found && bull.price > MathMax(ctx.main_alligator.teeth, ctx.main_alligator.lips) &&
-         ctx.ao_current > 0.0 && ctx.ao_current > ctx.ao_previous && confirm_ao > confirm_ao_prev &&
-         m_ind.MfiFilterOk(InpTradeTimeframe, true))
+         ctx.main_alligator.price_above && gap_ok && buy_fractal_ok && buy_ao_ok && buy_mfi_ok)
       {
          ctx.direction = SIGNAL_BUY;
          ctx.fractal = bull;
@@ -314,13 +369,15 @@ public:
               ctx.main_alligator.price_below && ctx.main_alligator.gap_points >= InpMinAlligatorGapPts &&
               bear.found && bear.price < MathMin(ctx.main_alligator.teeth, ctx.main_alligator.lips) &&
               ctx.ao_current < 0.0 && ctx.ao_current < ctx.ao_previous && confirm_ao < confirm_ao_prev &&
-              m_ind.MfiFilterOk(InpTradeTimeframe, false))
+              sell_mfi_ok)
       {
          ctx.direction = SIGNAL_SELL;
          ctx.fractal = bear;
          ctx.mfi_ok = true;
          ctx.reason = "Alligator down on H1/D1/M15; price below Alligator; bearish fractal below teeth/lips; AO negative and falling; MFI filter ok";
       }
+      if(ctx.direction == SIGNAL_NONE)
+         ctx.reason = "No entry: not all mandatory BUY or SELL filters passed. See diagnostics column for the exact failed checks.";
       return ctx;
    }
 
@@ -453,13 +510,18 @@ public:
       }
    }
 
-   bool Execute(const SignalContext &ctx, const double volume, const double sl, const double tp)
+   bool Execute(const SignalContext &ctx, const double volume, const double sl, const double tp, string &reject_reason)
    {
+      reject_reason = "";
       if(HasPositionDirection(ctx.direction))
+      {
+         reject_reason = "position in the same direction already exists";
          return false;
+      }
       const int spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
       if(spread > InpMaxSpreadPoints)
       {
+         reject_reason = StringFormat("spread filter blocked entry: spread=%d max=%d", spread, InpMaxSpreadPoints);
          Print("Spread filter blocked entry. Spread=", spread);
          return false;
       }
@@ -507,6 +569,14 @@ void OnDeinit(const int reason)
    g_logger.Deinit();
 }
 
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
+      g_logger.LogDeal(trans.deal);
+}
+
 void OnTick()
 {
    if(InpTradeOnNewBarOnly && !IsNewBar())
@@ -516,19 +586,32 @@ void OnTick()
 
    SignalContext ctx = g_signals.BuildSignal();
    if(ctx.direction == SIGNAL_NONE)
+   {
+      if(InpLogEveryDecision)
+         g_logger.LogSignal("NO_ENTRY", ctx);
       return;
+   }
 
    double volume = 0.0, sl = 0.0, tp = 0.0;
    if(!g_risk.BuildOrderPlan(ctx.direction, ctx.fractal, volume, sl, tp))
    {
+      ctx.reason = "No order: risk manager failed to build order plan";
+      g_logger.LogSignal("ORDER_BLOCKED", ctx);
       Print("Risk manager failed to build order plan");
       return;
    }
 
    g_logger.LogSignal("ENTRY_SIGNAL", ctx);
-   if(g_execution.Execute(ctx, volume, sl, tp))
+   string reject_reason = "";
+   if(g_execution.Execute(ctx, volume, sl, tp, reject_reason))
       g_logger.LogSignal("ORDER_SENT", ctx);
    else
-      Print("Order send failed: ", GetLastError());
+   {
+      if(reject_reason == "")
+         reject_reason = StringFormat("order send failed: terminal error %d", GetLastError());
+      ctx.reason = reject_reason;
+      g_logger.LogSignal("ORDER_BLOCKED", ctx);
+      Print("Order send failed: ", reject_reason);
+   }
 }
 //+------------------------------------------------------------------+
