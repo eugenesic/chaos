@@ -26,12 +26,18 @@ input int             InpTeethPeriod          = 8;
 input int             InpTeethShift           = 5;
 input int             InpLipsPeriod           = 5;
 input int             InpLipsShift            = 3;
-input int             InpMinAlligatorGapPts   = 10;
+input int             InpMinAlligatorGapPts   = 5;
+input bool            InpRequireConfirmAlligator = false;
+input bool            InpAllowConfirmAsTrendFallback = true;
+input bool            InpRequirePriceBeyondAlligator = false;
 
 input group "Awesome Oscillator / Fractals / MFI"
 input int             InpAOFastPeriod         = 5;
 input int             InpAOSlowPeriod         = 34;
 input int             InpFractalLookbackBars  = 80;
+input bool            InpRequireAOSlope       = false;
+input bool            InpRequireConfirmAO     = false;
+input bool            InpRequireFractalOutsideAlligator = false;
 input bool            InpUseMfiFilter         = false;
 input int             InpMfiAveragePeriod     = 20;
 
@@ -69,6 +75,8 @@ struct AlligatorState
    bool   aligned_down;
    bool   price_above;
    bool   price_below;
+   bool   price_above_teeth;
+   bool   price_below_teeth;
    double gap_points;
 };
 
@@ -138,6 +146,8 @@ public:
       state.aligned_down = (state.lips < state.teeth && state.teeth < state.jaw);
       state.price_above = (close_price > state.lips && close_price > state.teeth && close_price > state.jaw);
       state.price_below = (close_price < state.lips && close_price < state.teeth && close_price < state.jaw);
+      state.price_above_teeth = (close_price > state.teeth);
+      state.price_below_teeth = (close_price < state.teeth);
       state.gap_points = MathAbs(state.lips - state.jaw) / _Point;
       return state;
    }
@@ -341,40 +351,61 @@ public:
 
       const bool buy_mfi_ok = m_ind.MfiFilterOk(InpTradeTimeframe, true);
       const bool sell_mfi_ok = m_ind.MfiFilterOk(InpTradeTimeframe, false);
-      const bool buy_fractal_ok = (bull.found && bull.price > MathMax(ctx.main_alligator.teeth, ctx.main_alligator.lips));
-      const bool sell_fractal_ok = (bear.found && bear.price < MathMin(ctx.main_alligator.teeth, ctx.main_alligator.lips));
+      const bool buy_trend_ok = (ctx.trend_alligator.aligned_up || (InpAllowConfirmAsTrendFallback && confirm.aligned_up));
+      const bool sell_trend_ok = (ctx.trend_alligator.aligned_down || (InpAllowConfirmAsTrendFallback && confirm.aligned_down));
+      const bool buy_price_ok = (InpRequirePriceBeyondAlligator ? ctx.main_alligator.price_above : ctx.main_alligator.price_above_teeth);
+      const bool sell_price_ok = (InpRequirePriceBeyondAlligator ? ctx.main_alligator.price_below : ctx.main_alligator.price_below_teeth);
+      const bool buy_fractal_position_ok = (!InpRequireFractalOutsideAlligator || bull.price > MathMax(ctx.main_alligator.teeth, ctx.main_alligator.lips));
+      const bool sell_fractal_position_ok = (!InpRequireFractalOutsideAlligator || bear.price < MathMin(ctx.main_alligator.teeth, ctx.main_alligator.lips));
+      const bool buy_fractal_ok = (bull.found && buy_fractal_position_ok);
+      const bool sell_fractal_ok = (bear.found && sell_fractal_position_ok);
       const bool gap_ok = (ctx.main_alligator.gap_points >= InpMinAlligatorGapPts);
-      const bool buy_ao_ok = (ctx.ao_current > 0.0 && ctx.ao_current > ctx.ao_previous && confirm_ao > confirm_ao_prev);
-      const bool sell_ao_ok = (ctx.ao_current < 0.0 && ctx.ao_current < ctx.ao_previous && confirm_ao < confirm_ao_prev);
+      const bool buy_confirm_alligator_ok = (!InpRequireConfirmAlligator || confirm.aligned_up);
+      const bool sell_confirm_alligator_ok = (!InpRequireConfirmAlligator || confirm.aligned_down);
+      const bool buy_confirm_ao_ok = (!InpRequireConfirmAO || confirm_ao > confirm_ao_prev);
+      const bool sell_confirm_ao_ok = (!InpRequireConfirmAO || confirm_ao < confirm_ao_prev);
+      const bool buy_ao_slope_ok = (!InpRequireAOSlope || ctx.ao_current > ctx.ao_previous);
+      const bool sell_ao_slope_ok = (!InpRequireAOSlope || ctx.ao_current < ctx.ao_previous);
+      const bool buy_ao_ok = (ctx.ao_current > 0.0 && buy_ao_slope_ok && buy_confirm_ao_ok);
+      const bool sell_ao_ok = (ctx.ao_current < 0.0 && sell_ao_slope_ok && sell_confirm_ao_ok);
 
-      ctx.diagnostics = StringFormat("BUY checks: main_up=%s trend_up=%s confirm_up=%s price_above=%s gap_ok=%s(%.1f/%d) fractal_ok=%s(found=%s price=%s shift=%d) ao_ok=%s(ao=%s prev=%s confirm_ao=%s confirm_prev=%s) mfi_ok=%s | SELL checks: main_down=%s trend_down=%s confirm_down=%s price_below=%s gap_ok=%s fractal_ok=%s(found=%s price=%s shift=%d) ao_ok=%s mfi_ok=%s",
-                                     BoolText(ctx.main_alligator.aligned_up), BoolText(ctx.trend_alligator.aligned_up), BoolText(confirm.aligned_up),
-                                     BoolText(ctx.main_alligator.price_above), BoolText(gap_ok), ctx.main_alligator.gap_points, InpMinAlligatorGapPts,
-                                     BoolText(buy_fractal_ok), BoolText(bull.found), DoubleToString(bull.price, _Digits), bull.shift,
+      ctx.diagnostics = StringFormat("BUY checks: main_up=%s trend_up=%s trend_ok=%s(fallback_allowed=%s confirm_up=%s) confirm_required=%s confirm_ok=%s price_ok=%s(strict_price=%s price_above=%s price_above_teeth=%s) gap_ok=%s(%.1f/%d) fractal_ok=%s(found=%s outside_required=%s outside_ok=%s price=%s shift=%d) ao_ok=%s(ao=%s prev=%s slope_required=%s slope_ok=%s confirm_required=%s confirm_ao=%s confirm_prev=%s confirm_ok=%s) mfi_ok=%s | SELL checks: main_down=%s trend_down=%s trend_ok=%s(fallback_allowed=%s confirm_down=%s) confirm_required=%s confirm_ok=%s price_ok=%s(strict_price=%s price_below=%s price_below_teeth=%s) gap_ok=%s fractal_ok=%s(found=%s outside_required=%s outside_ok=%s price=%s shift=%d) ao_ok=%s(slope_required=%s slope_ok=%s confirm_required=%s confirm_ok=%s) mfi_ok=%s",
+                                     BoolText(ctx.main_alligator.aligned_up), BoolText(ctx.trend_alligator.aligned_up), BoolText(buy_trend_ok),
+                                     BoolText(InpAllowConfirmAsTrendFallback), BoolText(confirm.aligned_up),
+                                     BoolText(InpRequireConfirmAlligator), BoolText(buy_confirm_alligator_ok),
+                                     BoolText(buy_price_ok), BoolText(InpRequirePriceBeyondAlligator), BoolText(ctx.main_alligator.price_above),
+                                     BoolText(ctx.main_alligator.price_above_teeth), BoolText(gap_ok), ctx.main_alligator.gap_points, InpMinAlligatorGapPts,
+                                     BoolText(buy_fractal_ok), BoolText(bull.found), BoolText(InpRequireFractalOutsideAlligator),
+                                     BoolText(buy_fractal_position_ok), DoubleToString(bull.price, _Digits), bull.shift,
                                      BoolText(buy_ao_ok), DoubleToString(ctx.ao_current, _Digits), DoubleToString(ctx.ao_previous, _Digits),
-                                     DoubleToString(confirm_ao, _Digits), DoubleToString(confirm_ao_prev, _Digits), BoolText(buy_mfi_ok),
-                                     BoolText(ctx.main_alligator.aligned_down), BoolText(ctx.trend_alligator.aligned_down), BoolText(confirm.aligned_down),
-                                     BoolText(ctx.main_alligator.price_below), BoolText(gap_ok), BoolText(sell_fractal_ok), BoolText(bear.found),
-                                     DoubleToString(bear.price, _Digits), bear.shift, BoolText(sell_ao_ok), BoolText(sell_mfi_ok));
+                                     BoolText(InpRequireAOSlope), BoolText(buy_ao_slope_ok), BoolText(InpRequireConfirmAO),
+                                     DoubleToString(confirm_ao, _Digits), DoubleToString(confirm_ao_prev, _Digits),
+                                     BoolText(buy_confirm_ao_ok), BoolText(buy_mfi_ok),
+                                     BoolText(ctx.main_alligator.aligned_down), BoolText(ctx.trend_alligator.aligned_down), BoolText(sell_trend_ok),
+                                     BoolText(InpAllowConfirmAsTrendFallback), BoolText(confirm.aligned_down),
+                                     BoolText(InpRequireConfirmAlligator), BoolText(sell_confirm_alligator_ok),
+                                     BoolText(sell_price_ok), BoolText(InpRequirePriceBeyondAlligator), BoolText(ctx.main_alligator.price_below),
+                                     BoolText(ctx.main_alligator.price_below_teeth), BoolText(gap_ok), BoolText(sell_fractal_ok), BoolText(bear.found),
+                                     BoolText(InpRequireFractalOutsideAlligator), BoolText(sell_fractal_position_ok),
+                                     DoubleToString(bear.price, _Digits), bear.shift, BoolText(sell_ao_ok),
+                                     BoolText(InpRequireAOSlope), BoolText(sell_ao_slope_ok),
+                                     BoolText(InpRequireConfirmAO), BoolText(sell_confirm_ao_ok), BoolText(sell_mfi_ok));
 
-      if(ctx.main_alligator.aligned_up && ctx.trend_alligator.aligned_up && confirm.aligned_up &&
-         ctx.main_alligator.price_above && gap_ok && buy_fractal_ok && buy_ao_ok && buy_mfi_ok)
+      if(ctx.main_alligator.aligned_up && buy_trend_ok && buy_confirm_alligator_ok &&
+         buy_price_ok && gap_ok && buy_fractal_ok && buy_ao_ok && buy_mfi_ok)
       {
          ctx.direction = SIGNAL_BUY;
          ctx.fractal = bull;
          ctx.mfi_ok = true;
-         ctx.reason = "Alligator up on H1/D1/M15; price above Alligator; bullish fractal above teeth/lips; AO positive and rising; MFI filter ok";
+         ctx.reason = "Plan B BUY: trade Alligator up; trend timeframe or confirm timeframe supports direction; relaxed price/fractal/AO slope filters according to inputs; MFI filter ok";
       }
-      else if(ctx.main_alligator.aligned_down && ctx.trend_alligator.aligned_down && confirm.aligned_down &&
-              ctx.main_alligator.price_below && ctx.main_alligator.gap_points >= InpMinAlligatorGapPts &&
-              bear.found && bear.price < MathMin(ctx.main_alligator.teeth, ctx.main_alligator.lips) &&
-              ctx.ao_current < 0.0 && ctx.ao_current < ctx.ao_previous && confirm_ao < confirm_ao_prev &&
-              sell_mfi_ok)
+      else if(ctx.main_alligator.aligned_down && sell_trend_ok && sell_confirm_alligator_ok &&
+              sell_price_ok && gap_ok && sell_fractal_ok && sell_ao_ok && sell_mfi_ok)
       {
          ctx.direction = SIGNAL_SELL;
          ctx.fractal = bear;
          ctx.mfi_ok = true;
-         ctx.reason = "Alligator down on H1/D1/M15; price below Alligator; bearish fractal below teeth/lips; AO negative and falling; MFI filter ok";
+         ctx.reason = "Plan B SELL: trade Alligator down; trend timeframe or confirm timeframe supports direction; relaxed price/fractal/AO slope filters according to inputs; MFI filter ok";
       }
       if(ctx.direction == SIGNAL_NONE)
          ctx.reason = "No entry: not all mandatory BUY or SELL filters passed. See diagnostics column for the exact failed checks.";
