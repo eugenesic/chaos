@@ -22,6 +22,10 @@ input bool            InpUseTimeFilter        = false;
 input int             InpTradeStartHour       = 7;
 input int             InpTradeEndHour         = 20;
 input bool            InpUseKillzones         = true;
+input bool            InpUseKillzoneQualityFilter = false;
+input double          InpKillzoneMinATRPoints = 50.0;
+input long            InpKillzoneMinTickVolume = 100;
+input double          InpKillzoneMinRangeATRRatio = 0.30;
 input bool            InpTradeAsiaKillzone    = true;
 input int             InpAsiaStartHour        = 0;
 input int             InpAsiaEndHour          = 6;
@@ -48,6 +52,30 @@ input bool            InpAllowConfirmAsTrendFallback = true;
 input bool            InpRequirePriceBeyondAlligator = true;
 input bool            InpRequireFractalOutsideAlligator = false;
 
+input group "Adaptive Filters"
+input bool            InpUseAdaptiveFlatFilter = false;
+input double          InpFlatMaxAlligatorGapPts = 25.0;
+input double          InpFlatMaxATRPoints    = 80.0;
+input int             InpFlatConsolidationBars = 12;
+input double          InpFlatMaxRangeATRRatio = 1.50;
+input bool            InpUseATRVolatilityFilter = false;
+input double          InpMinATRPoints        = 40.0;
+input double          InpMaxATRPoints        = 400.0;
+input bool            InpUseTrendStrengthFilter = false;
+input double          InpMinTrendStrength    = 35.0;
+input int             InpTrendStrengthLookback = 3;
+input double          InpTrendGapFullScorePts = 120.0;
+input double          InpTrendDivergenceFullScorePts = 30.0;
+input double          InpTrendLipsSlopeFullScorePts = 30.0;
+input bool            InpUseHigherTimeframeFilter = false;
+input ENUM_TIMEFRAMES InpHigherTimeframe     = PERIOD_H4;
+input bool            InpHigherRequireAlligator = true;
+input bool            InpHigherRequireAO     = true;
+input bool            InpUseEnhancedFractalFilter = false;
+input double          InpFractalMinDistancePts = 50.0;
+input int             InpFractalNarrowRangeBars = 8;
+input double          InpFractalNarrowRangeATRRatio = 1.0;
+
 input group "Awesome Oscillator / Fractals / MFI"
 input int             InpAOFastPeriod         = 5;
 input int             InpAOSlowPeriod         = 34;
@@ -65,7 +93,9 @@ input int             InpMaxSameDirectionPositions = 1;
 input bool            InpCloseOnOppositeSignal = true;
 input bool            InpReverseOnOppositeSignal = false;
 input bool            InpUseAlligatorTrailingStop = true;
+input int             InpTrailingMode      = 2;
 input int             InpTrailingBufferPoints = 20;
+input double          InpTrailingATRMultiplier = 2.0;
 
 input group "Risk Management"
 input double          InpRiskPerTradePercent  = 1.0;
@@ -81,8 +111,27 @@ input bool            InpEnableCsvLog         = true;
 input string          InpLogFileName          = "BillWilliamsChaosEA_trades.csv";
 input bool            InpLogEveryDecision     = true;
 
+input group "Signal Score"
+input bool            InpUseSignalScore       = false;
+input double          InpMinSignalScore       = 70.0;
+input double          InpWeightTrendStrength  = 20.0;
+input double          InpWeightFlatFilter     = 15.0;
+input double          InpWeightHigherTimeframe = 15.0;
+input double          InpWeightFractalQuality = 20.0;
+input double          InpWeightATRFilter      = 15.0;
+input double          InpWeightKillzoneQuality = 15.0;
+
 //----------------------------- Types -------------------------------
 enum ENUM_SIGNAL_DIRECTION { SIGNAL_NONE = 0, SIGNAL_BUY = 1, SIGNAL_SELL = -1 };
+
+enum ENUM_TRAILING_MODE
+{
+   TRAIL_OFF = 0,
+   TRAIL_ATR,
+   TRAIL_TEETH,
+   TRAIL_FRACTAL,
+   TRAIL_HYBRID
+};
 
 enum ENUM_EXIT_REASON
 {
@@ -124,6 +173,11 @@ struct SignalContext
    double ao_previous;
    FractalSignal fractal;
    bool mfi_ok;
+   double atr;
+   double trend_strength;
+   double signal_score;
+   string alligator_state;
+   string filter_params;
    string diagnostics;
 };
 
@@ -219,6 +273,36 @@ public:
       return out;
    }
 
+
+   FractalSignal FindPreviousFractal(const ENUM_TIMEFRAMES tf, const bool bullish, const int min_shift, const int max_lookback) const
+   {
+      FractalSignal out;
+      out.found = false;
+      out.time = 0;
+      out.price = 0.0;
+      out.shift = 0;
+      MqlRates rates[];
+      const int bars_needed = MathMax(max_lookback + 10, 20);
+      if(!CopyTfRates(tf, bars_needed, rates))
+         return out;
+      for(int shift = MathMax(3, min_shift); shift <= max_lookback; shift++)
+      {
+         if(bullish)
+         {
+            const double v = rates[shift].low;
+            if(v < rates[shift-1].low && v < rates[shift-2].low && v < rates[shift+1].low && v < rates[shift+2].low)
+            { out.found = true; out.time = rates[shift].time; out.price = v; out.shift = shift; return out; }
+         }
+         else
+         {
+            const double v = rates[shift].high;
+            if(v > rates[shift-1].high && v > rates[shift-2].high && v > rates[shift+1].high && v > rates[shift+2].high)
+            { out.found = true; out.time = rates[shift].time; out.price = v; out.shift = shift; return out; }
+         }
+      }
+      return out;
+   }
+
    bool MfiFilterOk(const ENUM_TIMEFRAMES tf, const bool buy) const
    {
       if(!InpUseMfiFilter)
@@ -255,6 +339,37 @@ public:
          sum += tr;
       }
       return sum / (double)InpATRPeriod;
+   }
+
+   double GetRangePoints(const ENUM_TIMEFRAMES tf, const int shift, const int bars) const
+   {
+      MqlRates rates[];
+      if(bars <= 0 || !CopyTfRates(tf, shift + bars + 2, rates))
+         return 0.0;
+      double hi = rates[shift].high;
+      double lo = rates[shift].low;
+      for(int i = shift; i < shift + bars; i++)
+      {
+         hi = MathMax(hi, rates[i].high);
+         lo = MathMin(lo, rates[i].low);
+      }
+      return (hi - lo) / _Point;
+   }
+
+   long GetTickVolume(const ENUM_TIMEFRAMES tf, const int shift) const
+   {
+      MqlRates rates[];
+      if(!CopyTfRates(tf, shift + 2, rates))
+         return 0;
+      return rates[shift].tick_volume;
+   }
+
+   double GetClose(const ENUM_TIMEFRAMES tf, const int shift) const
+   {
+      MqlRates rates[];
+      if(!CopyTfRates(tf, shift + 2, rates))
+         return 0.0;
+      return rates[shift].close;
    }
 };
 
@@ -310,6 +425,128 @@ bool IsTradingTimeAllowed(string &reason)
    return true;
 }
 
+
+//-------------------------- Quality Modules ------------------------
+double ClampScore(const double value)
+{
+   return MathMax(0.0, MathMin(100.0, value));
+}
+
+class CTrendStrengthEvaluator
+{
+private:
+   CIndicatorEngine *m_ind;
+public:
+   void Init(CIndicatorEngine &ind) { m_ind = &ind; }
+
+   double Strength(const ENUM_TIMEFRAMES tf, const ENUM_SIGNAL_DIRECTION direction, string &details) const
+   {
+      const AlligatorState cur = m_ind.GetAlligator(tf, 1);
+      const AlligatorState prev = m_ind.GetAlligator(tf, 1 + MathMax(1, InpTrendStrengthLookback));
+      const double order_score = ((direction == SIGNAL_BUY && cur.aligned_up) || (direction == SIGNAL_SELL && cur.aligned_down) ? 25.0 : 0.0);
+      const double gap_score = MathMin(25.0, 25.0 * cur.gap_points / MathMax(1.0, InpTrendGapFullScorePts));
+      const double divergence = (cur.gap_points - prev.gap_points);
+      const double divergence_score = MathMin(25.0, 25.0 * MathMax(0.0, divergence) / MathMax(1.0, InpTrendDivergenceFullScorePts));
+      const double lips_slope_pts = (direction == SIGNAL_BUY ? cur.lips - prev.lips : prev.lips - cur.lips) / _Point;
+      const double slope_score = MathMin(25.0, 25.0 * MathMax(0.0, lips_slope_pts) / MathMax(1.0, InpTrendLipsSlopeFullScorePts));
+      const double score = ClampScore(order_score + gap_score + divergence_score + slope_score);
+      details = StringFormat("trend_strength=%.1f order=%.1f gap=%.1f divergence_pts=%.1f lips_slope_pts=%.1f", score, order_score, cur.gap_points, divergence, lips_slope_pts);
+      return score;
+   }
+};
+
+class CFlatMarketFilter
+{
+private:
+   CIndicatorEngine *m_ind;
+public:
+   void Init(CIndicatorEngine &ind) { m_ind = &ind; }
+   bool Allows(const AlligatorState &alligator, const double atr, string &details) const
+   {
+      const double atr_pts = atr / _Point;
+      const double range_pts = m_ind.GetRangePoints(InpTradeTimeframe, 1, InpFlatConsolidationBars);
+      const bool close_lines = (alligator.gap_points <= InpFlatMaxAlligatorGapPts);
+      const bool low_atr = (atr_pts <= InpFlatMaxATRPoints);
+      const bool consolidated = (range_pts <= atr_pts * InpFlatMaxRangeATRRatio);
+      details = StringFormat("flat_filter enabled=%s close_lines=%s(gap=%.1f max=%.1f) low_atr=%s(atr=%.1f max=%.1f) consolidation=%s(range=%.1f ratio_max=%.2f)", BoolText(InpUseAdaptiveFlatFilter), BoolText(close_lines), alligator.gap_points, InpFlatMaxAlligatorGapPts, BoolText(low_atr), atr_pts, InpFlatMaxATRPoints, BoolText(consolidated), range_pts, InpFlatMaxRangeATRRatio);
+      return (!InpUseAdaptiveFlatFilter || !(close_lines && low_atr && consolidated));
+   }
+};
+
+class CHigherTimeframeFilter
+{
+private:
+   CIndicatorEngine *m_ind;
+public:
+   void Init(CIndicatorEngine &ind) { m_ind = &ind; }
+   bool Allows(const ENUM_SIGNAL_DIRECTION direction, string &details) const
+   {
+      const AlligatorState htf = m_ind.GetAlligator(InpHigherTimeframe, 1);
+      const double ao = m_ind.GetAO(InpHigherTimeframe, 1);
+      const double ao_prev = m_ind.GetAO(InpHigherTimeframe, 2);
+      const bool alligator_ok = (!InpHigherRequireAlligator || (direction == SIGNAL_BUY ? htf.aligned_up : htf.aligned_down));
+      const bool ao_ok = (!InpHigherRequireAO || (direction == SIGNAL_BUY ? (ao > 0.0 && ao >= ao_prev) : (ao < 0.0 && ao <= ao_prev)));
+      details = StringFormat("htf_filter enabled=%s tf=%s alligator_ok=%s ao_ok=%s ao=%s prev=%s", BoolText(InpUseHigherTimeframeFilter), EnumToString(InpHigherTimeframe), BoolText(alligator_ok), BoolText(ao_ok), DoubleToString(ao, _Digits), DoubleToString(ao_prev, _Digits));
+      return (!InpUseHigherTimeframeFilter || (alligator_ok && ao_ok));
+   }
+};
+
+class CFractalQualityFilter
+{
+private:
+   CIndicatorEngine *m_ind;
+public:
+   void Init(CIndicatorEngine &ind) { m_ind = &ind; }
+   bool Allows(const ENUM_SIGNAL_DIRECTION direction, const FractalSignal &fractal, const AlligatorState &alligator, const double atr, string &details) const
+   {
+      if(!fractal.found)
+      {
+         details = "fractal_quality found=no";
+         return false;
+      }
+      const bool outside = (direction == SIGNAL_BUY ? fractal.price > MathMax(alligator.lips, alligator.teeth) : fractal.price < MathMin(alligator.lips, alligator.teeth));
+      const bool after_open = (alligator.gap_points >= InpMinAlligatorGapPts);
+      const FractalSignal prev = m_ind.FindPreviousFractal(InpTradeTimeframe, direction == SIGNAL_BUY, fractal.shift + 1, MathMin(InpFractalLookbackBars, fractal.shift + 40));
+      const double prev_dist = (prev.found ? MathAbs(fractal.price - prev.price) / _Point : InpFractalMinDistancePts);
+      const bool enough_distance = (prev_dist >= InpFractalMinDistancePts);
+      const double range_pts = m_ind.GetRangePoints(InpTradeTimeframe, 1, InpFractalNarrowRangeBars);
+      const double atr_pts = atr / _Point;
+      const bool narrow = (range_pts <= atr_pts * InpFractalNarrowRangeATRRatio);
+      details = StringFormat("fractal_quality enabled=%s outside=%s after_open=%s prev_dist=%.1f min=%.1f narrow=%s range=%.1f", BoolText(InpUseEnhancedFractalFilter), BoolText(outside), BoolText(after_open), prev_dist, InpFractalMinDistancePts, BoolText(narrow), range_pts);
+      return (!InpUseEnhancedFractalFilter || (outside && after_open && enough_distance && !narrow));
+   }
+};
+
+class CSignalQualityScorer
+{
+public:
+   double Score(const bool flat_ok, const bool htf_ok, const bool fractal_ok, const bool atr_ok, const bool killzone_ok, const double trend_strength, string &details) const
+   {
+      const double total = InpWeightTrendStrength + InpWeightFlatFilter + InpWeightHigherTimeframe + InpWeightFractalQuality + InpWeightATRFilter + InpWeightKillzoneQuality;
+      if(total <= 0.0) { details = "signal_score disabled_weights"; return 100.0; }
+      double raw = 0.0;
+      raw += InpWeightTrendStrength * ClampScore(trend_strength) / 100.0;
+      raw += InpWeightFlatFilter * (flat_ok ? 1.0 : 0.0);
+      raw += InpWeightHigherTimeframe * (htf_ok ? 1.0 : 0.0);
+      raw += InpWeightFractalQuality * (fractal_ok ? 1.0 : 0.0);
+      raw += InpWeightATRFilter * (atr_ok ? 1.0 : 0.0);
+      raw += InpWeightKillzoneQuality * (killzone_ok ? 1.0 : 0.0);
+      const double score = ClampScore(100.0 * raw / total);
+      details = StringFormat("SignalScore=%.1f min=%.1f weights trend=%.1f flat=%.1f htf=%.1f fractal=%.1f atr=%.1f killzone=%.1f", score, InpMinSignalScore, InpWeightTrendStrength, InpWeightFlatFilter, InpWeightHigherTimeframe, InpWeightFractalQuality, InpWeightATRFilter, InpWeightKillzoneQuality);
+      return score;
+   }
+};
+
+bool KillzoneQualityAllows(CIndicatorEngine *ind, string &details)
+{
+   const double atr_pts = ind.GetATR(InpTradeTimeframe, 1) / _Point;
+   const long volume = ind.GetTickVolume(InpTradeTimeframe, 1);
+   const double range_pts = ind.GetRangePoints(InpTradeTimeframe, 1, 1);
+   const bool ok = (!InpUseKillzoneQualityFilter || (atr_pts >= InpKillzoneMinATRPoints && volume >= InpKillzoneMinTickVolume && range_pts >= atr_pts * InpKillzoneMinRangeATRRatio));
+   details = StringFormat("killzone_quality enabled=%s atr=%.1f min=%.1f volume=%d min=%d range=%.1f activity_ratio=%.2f ok=%s", BoolText(InpUseKillzoneQualityFilter), atr_pts, InpKillzoneMinATRPoints, volume, InpKillzoneMinTickVolume, range_pts, InpKillzoneMinRangeATRRatio, BoolText(ok));
+   return ok;
+}
+
 //----------------------------- Logger ------------------------------
 class CBacktestLogger
 {
@@ -329,7 +566,7 @@ public:
          return;
       }
       if(FileSize(m_handle) == 0)
-         FileWrite(m_handle, "time", "symbol", "event", "direction", "reason", "diagnostics", "ao", "ao_previous", "jaw", "teeth", "lips", "trend_jaw", "trend_teeth", "trend_lips", "fractal_price", "fractal_time", "fractal_shift");
+         FileWrite(m_handle, "time", "symbol", "event", "direction", "reason", "diagnostics", "ao", "ao_previous", "jaw", "teeth", "lips", "trend_jaw", "trend_teeth", "trend_lips", "fractal_price", "fractal_time", "fractal_shift", "trend_strength", "atr", "alligator_state", "signal_score", "filter_params");
       FileSeek(m_handle, 0, SEEK_END);
    }
 
@@ -365,7 +602,7 @@ public:
                                               HistoryDealGetInteger(deal_ticket, DEAL_ORDER),
                                               HistoryDealGetInteger(deal_ticket, DEAL_POSITION_ID));
       FileWrite(m_handle, TimeToString((datetime)HistoryDealGetInteger(deal_ticket, DEAL_TIME), TIME_DATE|TIME_SECONDS),
-                _Symbol, "DEAL_EXECUTED", direction, reason, diagnostics, "", "", "", "", "", "", "", "", "", "", "");
+                _Symbol, "DEAL_EXECUTED", direction, reason, diagnostics, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "");
       FileFlush(m_handle);
    }
 
@@ -384,7 +621,8 @@ public:
                    DoubleToString(ctx.main_alligator.jaw, _Digits), DoubleToString(ctx.main_alligator.teeth, _Digits),
                    DoubleToString(ctx.main_alligator.lips, _Digits), DoubleToString(ctx.trend_alligator.jaw, _Digits),
                    DoubleToString(ctx.trend_alligator.teeth, _Digits), DoubleToString(ctx.trend_alligator.lips, _Digits),
-                   DoubleToString(ctx.fractal.price, _Digits), TimeToString(ctx.fractal.time, TIME_DATE|TIME_SECONDS), ctx.fractal.shift);
+                   DoubleToString(ctx.fractal.price, _Digits), TimeToString(ctx.fractal.time, TIME_DATE|TIME_SECONDS), ctx.fractal.shift,
+                   DoubleToString(ctx.trend_strength, 1), DoubleToString(ctx.atr / _Point, 1), ctx.alligator_state, DoubleToString(ctx.signal_score, 1), ctx.filter_params);
          FileFlush(m_handle);
       }
    }
@@ -395,8 +633,13 @@ class CSignalEngine
 {
 private:
    CIndicatorEngine *m_ind;
+   CTrendStrengthEvaluator m_trend_strength;
+   CFlatMarketFilter m_flat_filter;
+   CHigherTimeframeFilter m_htf_filter;
+   CFractalQualityFilter m_fractal_quality;
+   CSignalQualityScorer m_scorer;
 public:
-   void Init(CIndicatorEngine &ind) { m_ind = &ind; }
+   void Init(CIndicatorEngine &ind) { m_ind = &ind; m_trend_strength.Init(ind); m_flat_filter.Init(ind); m_htf_filter.Init(ind); m_fractal_quality.Init(ind); }
 
    SignalContext BuildSignal()
    {
@@ -410,6 +653,11 @@ public:
       ctx.fractal.price = 0.0;
       ctx.fractal.shift = 0;
       ctx.mfi_ok = false;
+      ctx.atr = 0.0;
+      ctx.trend_strength = 0.0;
+      ctx.signal_score = 0.0;
+      ctx.alligator_state = "";
+      ctx.filter_params = "";
       ctx.diagnostics = "";
       ctx.main_alligator = m_ind.GetAlligator(InpTradeTimeframe, 1);
       ctx.trend_alligator = m_ind.GetAlligator(InpTrendTimeframe, 1);
@@ -443,6 +691,27 @@ public:
       const bool sell_ao_slope_ok = (!InpRequireAOSlope || ctx.ao_current < ctx.ao_previous);
       const bool buy_ao_ok = (buy_ao_sign_ok && buy_ao_slope_ok && buy_confirm_ao_ok);
       const bool sell_ao_ok = (sell_ao_sign_ok && sell_ao_slope_ok && sell_confirm_ao_ok);
+      ctx.atr = m_ind.GetATR(InpTradeTimeframe, 1);
+      const double atr_pts = ctx.atr / _Point;
+      const bool atr_filter_ok = (!InpUseATRVolatilityFilter || (atr_pts >= InpMinATRPoints && atr_pts <= InpMaxATRPoints));
+      string flat_details = "", htf_buy_details = "", htf_sell_details = "", fractal_buy_details = "", fractal_sell_details = "", score_details = "", trend_buy_details = "", trend_sell_details = "", killzone_quality_details = "";
+      const bool flat_ok = m_flat_filter.Allows(ctx.main_alligator, ctx.atr, flat_details);
+      const bool htf_buy_ok = m_htf_filter.Allows(SIGNAL_BUY, htf_buy_details);
+      const bool htf_sell_ok = m_htf_filter.Allows(SIGNAL_SELL, htf_sell_details);
+      const bool buy_fractal_quality_ok = m_fractal_quality.Allows(SIGNAL_BUY, bull, ctx.main_alligator, ctx.atr, fractal_buy_details);
+      const bool sell_fractal_quality_ok = m_fractal_quality.Allows(SIGNAL_SELL, bear, ctx.main_alligator, ctx.atr, fractal_sell_details);
+      const bool killzone_quality_ok = KillzoneQualityAllows(m_ind, killzone_quality_details);
+      const double buy_trend_strength = m_trend_strength.Strength(InpTradeTimeframe, SIGNAL_BUY, trend_buy_details);
+      const double sell_trend_strength = m_trend_strength.Strength(InpTradeTimeframe, SIGNAL_SELL, trend_sell_details);
+      const bool buy_trend_strength_ok = (!InpUseTrendStrengthFilter || buy_trend_strength >= InpMinTrendStrength);
+      const bool sell_trend_strength_ok = (!InpUseTrendStrengthFilter || sell_trend_strength >= InpMinTrendStrength);
+      const double buy_score = m_scorer.Score(flat_ok, htf_buy_ok, buy_fractal_quality_ok, atr_filter_ok, killzone_quality_ok, buy_trend_strength, score_details);
+      const string buy_score_details = score_details;
+      const double sell_score = m_scorer.Score(flat_ok, htf_sell_ok, sell_fractal_quality_ok, atr_filter_ok, killzone_quality_ok, sell_trend_strength, score_details);
+      const bool buy_score_ok = (!InpUseSignalScore || buy_score >= InpMinSignalScore);
+      const bool sell_score_ok = (!InpUseSignalScore || sell_score >= InpMinSignalScore);
+      ctx.alligator_state = StringFormat("main_up=%s main_down=%s gap=%.1f price_above=%s price_below=%s", BoolText(ctx.main_alligator.aligned_up), BoolText(ctx.main_alligator.aligned_down), ctx.main_alligator.gap_points, BoolText(ctx.main_alligator.price_above), BoolText(ctx.main_alligator.price_below));
+      ctx.filter_params = StringFormat("ATR=%.1f min=%.1f max=%.1f | %s | %s | BUY %s | SELL %s | BUY %s | SELL %s | %s | BUY %s | SELL %s", atr_pts, InpMinATRPoints, InpMaxATRPoints, flat_details, killzone_quality_details, htf_buy_details, htf_sell_details, fractal_buy_details, fractal_sell_details, trend_buy_details, trend_sell_details, buy_score_details, score_details);
 
       ctx.diagnostics = StringFormat("BUY checks: main_up=%s trend_up=%s(trend_required=%s trend_ok=%s) confirm_up=%s(confirm_required=%s confirm_ok=%s) price_ok=%s(price_above_all=%s above_teeth=%s require_all=%s) gap_ok=%s(%.1f/%d) fractal_ok=%s(found=%s price=%s shift=%d) ao_ok=%s(ao=%s prev=%s require_sign=%s sign_ok=%s require_slope=%s slope_ok=%s confirm_required=%s confirm_ao=%s confirm_prev=%s confirm_ok=%s) mfi_ok=%s | SELL checks: main_down=%s trend_down=%s(trend_required=%s trend_ok=%s) confirm_down=%s(confirm_required=%s confirm_ok=%s) price_ok=%s(price_below_all=%s below_teeth=%s require_all=%s) gap_ok=%s fractal_ok=%s(found=%s price=%s shift=%d) ao_ok=%s(require_sign=%s sign_ok=%s require_slope=%s slope_ok=%s confirm_required=%s confirm_ok=%s) mfi_ok=%s",
                                      BoolText(ctx.main_alligator.aligned_up), BoolText(ctx.trend_alligator.aligned_up), BoolText(InpRequireTrendAlligator), BoolText(buy_trend_ok), BoolText(confirm.aligned_up),
@@ -459,25 +728,34 @@ public:
                                      DoubleToString(bear.price, _Digits), bear.shift, BoolText(sell_ao_ok),
                                      BoolText(InpRequireAOSign), BoolText(sell_ao_sign_ok), BoolText(InpRequireAOSlope), BoolText(sell_ao_slope_ok),
                                      BoolText(InpRequireConfirmAO), BoolText(sell_confirm_ao_ok), BoolText(sell_mfi_ok));
+      ctx.diagnostics += StringFormat(" | Adaptive filters: flat_ok=%s atr_ok=%s htf_buy_ok=%s htf_sell_ok=%s fractal_quality_buy=%s fractal_quality_sell=%s killzone_quality_ok=%s trend_strength_buy=%.1f(ok=%s) trend_strength_sell=%.1f(ok=%s) score_buy=%.1f(ok=%s) score_sell=%.1f(ok=%s) | %s",
+                                      BoolText(flat_ok), BoolText(atr_filter_ok), BoolText(htf_buy_ok), BoolText(htf_sell_ok), BoolText(buy_fractal_quality_ok), BoolText(sell_fractal_quality_ok), BoolText(killzone_quality_ok),
+                                      buy_trend_strength, BoolText(buy_trend_strength_ok), sell_trend_strength, BoolText(sell_trend_strength_ok), buy_score, BoolText(buy_score_ok), sell_score, BoolText(sell_score_ok), ctx.filter_params);
 
       if(ctx.main_alligator.aligned_up && buy_trend_ok && buy_confirm_alligator_ok &&
-         buy_price_ok && gap_ok && buy_fractal_ok && buy_ao_ok && buy_mfi_ok)
+         buy_price_ok && gap_ok && buy_fractal_ok && buy_ao_ok && buy_mfi_ok &&
+         flat_ok && atr_filter_ok && htf_buy_ok && buy_fractal_quality_ok && killzone_quality_ok && buy_trend_strength_ok && buy_score_ok)
       {
          ctx.direction = SIGNAL_BUY;
          ctx.fractal = bull;
          ctx.mfi_ok = true;
+         ctx.trend_strength = buy_trend_strength;
+         ctx.signal_score = buy_score;
          ctx.reason = "Plan A BUY: trade Alligator up; trend filter configurable; confirm Alligator optional; price beyond configured Alligator threshold; bullish fractal accepted by configured placement rule; AO sign/slope filters configurable; confirm AO optional; MFI filter ok";
       }
       else if(ctx.main_alligator.aligned_down && sell_trend_ok && sell_confirm_alligator_ok &&
-              sell_price_ok && gap_ok && sell_fractal_ok && sell_ao_ok && sell_mfi_ok)
+              sell_price_ok && gap_ok && sell_fractal_ok && sell_ao_ok && sell_mfi_ok &&
+              flat_ok && atr_filter_ok && htf_sell_ok && sell_fractal_quality_ok && killzone_quality_ok && sell_trend_strength_ok && sell_score_ok)
       {
          ctx.direction = SIGNAL_SELL;
          ctx.fractal = bear;
          ctx.mfi_ok = true;
+         ctx.trend_strength = sell_trend_strength;
+         ctx.signal_score = sell_score;
          ctx.reason = "Plan A SELL: trade Alligator down; trend filter configurable; confirm Alligator optional; price beyond configured Alligator threshold; bearish fractal accepted by configured placement rule; AO sign/slope filters configurable; confirm AO optional; MFI filter ok";
       }
       if(ctx.direction == SIGNAL_NONE)
-         ctx.reason = "No entry: not all mandatory BUY or SELL filters passed. See diagnostics column for the exact failed checks.";
+         ctx.reason = StringFormat("No entry: mandatory or adaptive filters failed. ATR=%.1f trend_buy=%.1f trend_sell=%.1f score_buy=%.1f score_sell=%.1f. See diagnostics for exact refusal reasons.", atr_pts, buy_trend_strength, sell_trend_strength, buy_score, sell_score);
       return ctx;
    }
 
@@ -665,9 +943,12 @@ public:
 
    void ApplyAlligatorTrailingStop(const CIndicatorEngine &ind)
    {
-      if(!InpUseAlligatorTrailingStop)
+      if(!InpUseAlligatorTrailingStop || InpTrailingMode == TRAIL_OFF)
          return;
       const AlligatorState alligator = ind.GetAlligator(InpTradeTimeframe, 1);
+      const double atr = ind.GetATR(InpTradeTimeframe, 1);
+      const FractalSignal buy_fractal = ind.FindFractal(InpTradeTimeframe, true, InpFractalLookbackBars);
+      const FractalSignal sell_fractal = ind.FindFractal(InpTradeTimeframe, false, InpFractalLookbackBars);
       for(int i = PositionsTotal() - 1; i >= 0; i--)
       {
          const ulong ticket = PositionGetTicket(i);
@@ -676,17 +957,33 @@ public:
          const ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
          const double current_sl = PositionGetDouble(POSITION_SL);
          const double current_tp = PositionGetDouble(POSITION_TP);
-         double next_sl = 0.0;
+         const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         const double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         double teeth_sl = 0.0, atr_sl = 0.0, fractal_sl = 0.0, next_sl = 0.0;
          if(type == POSITION_TYPE_BUY)
          {
-            next_sl = NormalizeDouble(alligator.teeth - InpTrailingBufferPoints * _Point, _Digits);
-            if(next_sl > current_sl && next_sl < SymbolInfoDouble(_Symbol, SYMBOL_BID))
+            teeth_sl = alligator.teeth - InpTrailingBufferPoints * _Point;
+            atr_sl = bid - atr * InpTrailingATRMultiplier;
+            fractal_sl = (buy_fractal.found ? buy_fractal.price - InpTrailingBufferPoints * _Point : 0.0);
+            if(InpTrailingMode == TRAIL_TEETH) next_sl = teeth_sl;
+            else if(InpTrailingMode == TRAIL_ATR) next_sl = atr_sl;
+            else if(InpTrailingMode == TRAIL_FRACTAL) next_sl = fractal_sl;
+            else if(InpTrailingMode == TRAIL_HYBRID) next_sl = MathMax(teeth_sl, MathMax(atr_sl, fractal_sl));
+            next_sl = NormalizeDouble(next_sl, _Digits);
+            if(next_sl > 0.0 && next_sl > current_sl && next_sl < bid)
                m_trade.PositionModify(ticket, next_sl, current_tp);
          }
          else if(type == POSITION_TYPE_SELL)
          {
-            next_sl = NormalizeDouble(alligator.teeth + InpTrailingBufferPoints * _Point, _Digits);
-            if((current_sl == 0.0 || next_sl < current_sl) && next_sl > SymbolInfoDouble(_Symbol, SYMBOL_ASK))
+            teeth_sl = alligator.teeth + InpTrailingBufferPoints * _Point;
+            atr_sl = ask + atr * InpTrailingATRMultiplier;
+            fractal_sl = (sell_fractal.found ? sell_fractal.price + InpTrailingBufferPoints * _Point : 0.0);
+            if(InpTrailingMode == TRAIL_TEETH) next_sl = teeth_sl;
+            else if(InpTrailingMode == TRAIL_ATR) next_sl = atr_sl;
+            else if(InpTrailingMode == TRAIL_FRACTAL) next_sl = fractal_sl;
+            else if(InpTrailingMode == TRAIL_HYBRID) next_sl = (fractal_sl > 0.0 ? MathMin(teeth_sl, MathMin(atr_sl, fractal_sl)) : MathMin(teeth_sl, atr_sl));
+            next_sl = NormalizeDouble(next_sl, _Digits);
+            if(next_sl > ask && (current_sl == 0.0 || next_sl < current_sl))
                m_trade.PositionModify(ticket, next_sl, current_tp);
          }
       }
