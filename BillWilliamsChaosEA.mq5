@@ -71,6 +71,8 @@ struct AlligatorState
    bool   aligned_down;
    bool   price_above;
    bool   price_below;
+   bool   price_above_teeth;
+   bool   price_below_teeth;
    double gap_points;
 };
 
@@ -140,6 +142,8 @@ public:
       state.aligned_down = (state.lips < state.teeth && state.teeth < state.jaw);
       state.price_above = (close_price > state.lips && close_price > state.teeth && close_price > state.jaw);
       state.price_below = (close_price < state.lips && close_price < state.teeth && close_price < state.jaw);
+      state.price_above_teeth = (close_price > state.teeth);
+      state.price_below_teeth = (close_price < state.teeth);
       state.gap_points = MathAbs(state.lips - state.jaw) / _Point;
       return state;
    }
@@ -343,8 +347,14 @@ public:
 
       const bool buy_mfi_ok = m_ind.MfiFilterOk(InpTradeTimeframe, true);
       const bool sell_mfi_ok = m_ind.MfiFilterOk(InpTradeTimeframe, false);
-      const bool buy_fractal_ok = (bull.found && bull.price > MathMax(ctx.main_alligator.teeth, ctx.main_alligator.lips));
-      const bool sell_fractal_ok = (bear.found && bear.price < MathMin(ctx.main_alligator.teeth, ctx.main_alligator.lips));
+      const bool buy_trend_ok = (ctx.trend_alligator.aligned_up || (InpAllowConfirmAsTrendFallback && confirm.aligned_up));
+      const bool sell_trend_ok = (ctx.trend_alligator.aligned_down || (InpAllowConfirmAsTrendFallback && confirm.aligned_down));
+      const bool buy_price_ok = (InpRequirePriceBeyondAlligator ? ctx.main_alligator.price_above : ctx.main_alligator.price_above_teeth);
+      const bool sell_price_ok = (InpRequirePriceBeyondAlligator ? ctx.main_alligator.price_below : ctx.main_alligator.price_below_teeth);
+      const bool buy_fractal_position_ok = (!InpRequireFractalOutsideAlligator || bull.price > MathMax(ctx.main_alligator.teeth, ctx.main_alligator.lips));
+      const bool sell_fractal_position_ok = (!InpRequireFractalOutsideAlligator || bear.price < MathMin(ctx.main_alligator.teeth, ctx.main_alligator.lips));
+      const bool buy_fractal_ok = (bull.found && buy_fractal_position_ok);
+      const bool sell_fractal_ok = (bear.found && sell_fractal_position_ok);
       const bool gap_ok = (ctx.main_alligator.gap_points >= InpMinAlligatorGapPts);
       const bool buy_confirm_alligator_ok = (!InpRequireConfirmAlligator || confirm.aligned_up);
       const bool sell_confirm_alligator_ok = (!InpRequireConfirmAlligator || confirm.aligned_down);
