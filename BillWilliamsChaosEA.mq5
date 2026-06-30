@@ -18,6 +18,11 @@ input ENUM_TIMEFRAMES InpConfirmTimeframe     = PERIOD_M15;
 input bool            InpTradeOnNewBarOnly    = true;
 input int             InpMaxSpreadPoints      = 30;
 input int             InpSlippagePoints       = 10;
+input bool            InpUseTimeFilter        = false;
+input int             InpTradeStartHour       = 7;
+input int             InpTradeEndHour         = 20;
+input bool            InpAvoidFridayAfterHour = true;
+input int             InpFridayCutoffHour     = 18;
 
 input group "Alligator"
 input int             InpJawPeriod            = 13;
@@ -30,7 +35,7 @@ input int             InpMinAlligatorGapPts   = 5;
 input bool            InpRequireConfirmAlligator = false;
 input bool            InpRequireTrendAlligator = false;
 input bool            InpAllowConfirmAsTrendFallback = true;
-input bool            InpRequirePriceBeyondAlligator = false;
+input bool            InpRequirePriceBeyondAlligator = true;
 input bool            InpRequireFractalOutsideAlligator = false;
 
 input group "Awesome Oscillator / Fractals / MFI"
@@ -42,6 +47,15 @@ input bool            InpRequireAOSign        = false;
 input bool            InpRequireAOSlope       = true;
 input bool            InpUseMfiFilter         = false;
 input int             InpMfiAveragePeriod     = 20;
+
+input group "Position Management"
+input int             InpMaxOpenPositions     = 1;
+input bool            InpAllowPyramiding      = false;
+input int             InpMaxSameDirectionPositions = 1;
+input bool            InpCloseOnOppositeSignal = true;
+input bool            InpReverseOnOppositeSignal = false;
+input bool            InpUseAlligatorTrailingStop = true;
+input int             InpTrailingBufferPoints = 20;
 
 input group "Risk Management"
 input double          InpRiskPerTradePercent  = 1.0;
@@ -237,6 +251,33 @@ public:
 string BoolText(const bool value)
 {
    return (value ? "yes" : "no");
+}
+
+bool IsTradingTimeAllowed(string &reason)
+{
+   reason = "";
+   if(!InpUseTimeFilter && !InpAvoidFridayAfterHour)
+      return true;
+
+   MqlDateTime now;
+   TimeToStruct(TimeCurrent(), now);
+   if(InpUseTimeFilter)
+   {
+      const bool in_session = (InpTradeStartHour <= InpTradeEndHour
+                               ? (now.hour >= InpTradeStartHour && now.hour < InpTradeEndHour)
+                               : (now.hour >= InpTradeStartHour || now.hour < InpTradeEndHour));
+      if(!in_session)
+      {
+         reason = StringFormat("time filter blocked entry: hour=%d session=%02d-%02d", now.hour, InpTradeStartHour, InpTradeEndHour);
+         return false;
+      }
+   }
+   if(InpAvoidFridayAfterHour && now.day_of_week == 5 && now.hour >= InpFridayCutoffHour)
+   {
+      reason = StringFormat("friday cutoff blocked entry: hour=%d cutoff=%02d", now.hour, InpFridayCutoffHour);
+      return false;
+   }
+   return true;
 }
 
 //----------------------------- Logger ------------------------------
@@ -503,20 +544,122 @@ public:
       m_trade.SetDeviationInPoints(InpSlippagePoints);
    }
 
-   bool HasPositionDirection(const ENUM_SIGNAL_DIRECTION direction) const
+   bool IsOwnPositionSelected() const
    {
+      return (PositionGetString(POSITION_SYMBOL) == _Symbol &&
+              PositionGetInteger(POSITION_MAGIC) == (long)InpMagicNumber);
+   }
+
+   int CountPositions(const ENUM_SIGNAL_DIRECTION direction = SIGNAL_NONE) const
+   {
+      int count = 0;
       for(int i = PositionsTotal() - 1; i >= 0; i--)
       {
          const ulong ticket = PositionGetTicket(i);
-         if(ticket == 0 || !PositionSelectByTicket(ticket))
-            continue;
-         if(PositionGetString(POSITION_SYMBOL) != _Symbol || PositionGetInteger(POSITION_MAGIC) != (long)InpMagicNumber)
+         if(ticket == 0 || !PositionSelectByTicket(ticket) || !IsOwnPositionSelected())
             continue;
          const ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-         if((direction == SIGNAL_BUY && type == POSITION_TYPE_BUY) || (direction == SIGNAL_SELL && type == POSITION_TYPE_SELL))
-            return true;
+         if(direction == SIGNAL_NONE ||
+            (direction == SIGNAL_BUY && type == POSITION_TYPE_BUY) ||
+            (direction == SIGNAL_SELL && type == POSITION_TYPE_SELL))
+            count++;
       }
+      return count;
+   }
+
+   bool HasPositionDirection(const ENUM_SIGNAL_DIRECTION direction) const
+   {
+      return (CountPositions(direction) > 0);
+   }
+
+   bool HasOppositePosition(const ENUM_SIGNAL_DIRECTION direction) const
+   {
+      if(direction == SIGNAL_BUY)
+         return HasPositionDirection(SIGNAL_SELL);
+      if(direction == SIGNAL_SELL)
+         return HasPositionDirection(SIGNAL_BUY);
       return false;
+   }
+
+   bool ClosePositionsByDirection(const ENUM_SIGNAL_DIRECTION direction)
+   {
+      bool ok = true;
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         const ulong ticket = PositionGetTicket(i);
+         if(ticket == 0 || !PositionSelectByTicket(ticket) || !IsOwnPositionSelected())
+            continue;
+         const ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+         if((direction == SIGNAL_BUY && type == POSITION_TYPE_BUY) ||
+            (direction == SIGNAL_SELL && type == POSITION_TYPE_SELL))
+         {
+            Print("Closing position ", ticket, " before opposite signal handling");
+            ok = (m_trade.PositionClose(ticket) && ok);
+         }
+      }
+      return ok;
+   }
+
+   void CloseOppositePositions(const ENUM_SIGNAL_DIRECTION signal_direction)
+   {
+      if(!InpCloseOnOppositeSignal)
+         return;
+      if(signal_direction == SIGNAL_BUY)
+         ClosePositionsByDirection(SIGNAL_SELL);
+      else if(signal_direction == SIGNAL_SELL)
+         ClosePositionsByDirection(SIGNAL_BUY);
+   }
+
+   bool ExposureAllowsEntry(const ENUM_SIGNAL_DIRECTION direction, string &reject_reason) const
+   {
+      reject_reason = "";
+      const int total = CountPositions();
+      const int same_direction = CountPositions(direction);
+      if(!InpAllowPyramiding && same_direction > 0)
+      {
+         reject_reason = "same-direction position already exists; new order skipped by position manager";
+         return false;
+      }
+      if(same_direction >= InpMaxSameDirectionPositions)
+      {
+         reject_reason = StringFormat("same-direction position limit reached: current=%d max=%d", same_direction, InpMaxSameDirectionPositions);
+         return false;
+      }
+      if(total >= InpMaxOpenPositions && !(InpReverseOnOppositeSignal && HasOppositePosition(direction)))
+      {
+         reject_reason = StringFormat("open position limit reached: current=%d max=%d", total, InpMaxOpenPositions);
+         return false;
+      }
+      return true;
+   }
+
+   void ApplyAlligatorTrailingStop(const CIndicatorEngine &ind)
+   {
+      if(!InpUseAlligatorTrailingStop)
+         return;
+      const AlligatorState alligator = ind.GetAlligator(InpTradeTimeframe, 1);
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         const ulong ticket = PositionGetTicket(i);
+         if(ticket == 0 || !PositionSelectByTicket(ticket) || !IsOwnPositionSelected())
+            continue;
+         const ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+         const double current_sl = PositionGetDouble(POSITION_SL);
+         const double current_tp = PositionGetDouble(POSITION_TP);
+         double next_sl = 0.0;
+         if(type == POSITION_TYPE_BUY)
+         {
+            next_sl = NormalizeDouble(alligator.teeth - InpTrailingBufferPoints * _Point, _Digits);
+            if(next_sl > current_sl && next_sl < SymbolInfoDouble(_Symbol, SYMBOL_BID))
+               m_trade.PositionModify(ticket, next_sl, current_tp);
+         }
+         else if(type == POSITION_TYPE_SELL)
+         {
+            next_sl = NormalizeDouble(alligator.teeth + InpTrailingBufferPoints * _Point, _Digits);
+            if((current_sl == 0.0 || next_sl < current_sl) && next_sl > SymbolInfoDouble(_Symbol, SYMBOL_ASK))
+               m_trade.PositionModify(ticket, next_sl, current_tp);
+         }
+      }
    }
 
    void CloseByExitRules(CSignalEngine &signals)
@@ -542,11 +685,6 @@ public:
    bool Execute(const SignalContext &ctx, const double volume, const double sl, const double tp, string &reject_reason)
    {
       reject_reason = "";
-      if(HasPositionDirection(ctx.direction))
-      {
-         reject_reason = "position in the same direction already exists";
-         return false;
-      }
       const int spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
       if(spread > InpMaxSpreadPoints)
       {
@@ -612,10 +750,38 @@ void OnTick()
       return;
 
    g_execution.CloseByExitRules(g_signals);
+   g_execution.ApplyAlligatorTrailingStop(g_indicators);
 
    SignalContext ctx = g_signals.BuildSignal();
    if(ctx.direction == SIGNAL_NONE)
    {
+      if(InpLogEveryDecision)
+         g_logger.LogSignal("NO_ENTRY", ctx);
+      return;
+   }
+
+   string reject_reason = "";
+   if(!IsTradingTimeAllowed(reject_reason))
+   {
+      ctx.reason = reject_reason;
+      g_logger.LogSignal("ORDER_BLOCKED", ctx);
+      return;
+   }
+
+   if(g_execution.HasOppositePosition(ctx.direction) && InpCloseOnOppositeSignal)
+   {
+      g_execution.CloseOppositePositions(ctx.direction);
+      if(!InpReverseOnOppositeSignal)
+      {
+         ctx.reason = "opposite signal closed existing position; reverse entry disabled";
+         g_logger.LogSignal("ORDER_BLOCKED", ctx);
+         return;
+      }
+   }
+
+   if(!g_execution.ExposureAllowsEntry(ctx.direction, reject_reason))
+   {
+      ctx.reason = reject_reason;
       if(InpLogEveryDecision)
          g_logger.LogSignal("NO_ENTRY", ctx);
       return;
@@ -631,7 +797,7 @@ void OnTick()
    }
 
    g_logger.LogSignal("ENTRY_SIGNAL", ctx);
-   string reject_reason = "";
+   reject_reason = "";
    if(g_execution.Execute(ctx, volume, sl, tp, reject_reason))
       g_logger.LogSignal("ORDER_SENT", ctx);
    else
