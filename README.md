@@ -23,23 +23,36 @@ By default the EA now uses a less passive balanced configuration. A buy entry re
 1. H1 Alligator is aligned upward: Lips > Teeth > Jaw.
 2. The D1 trend Alligator agrees only when `InpRequireTrendAlligator=true`; otherwise it is logged diagnostically and can be used during optimization.
 3. The M15 confirmation Alligator agrees only when `InpRequireConfirmAlligator=true`.
-4. H1 close is above the Teeth line by default; set `InpRequirePriceBeyondAlligator=true` to require a close above all three Alligator lines.
+4. H1 close is above all three Alligator lines by default (`InpRequirePriceBeyondAlligator=true`); set it to `false` during aggressive tests to require only a close above the Teeth line.
 5. H1 Alligator Lips/Jaw gap is at least `InpMinAlligatorGapPts`.
 6. A confirmed bullish fractal exists within `InpFractalLookbackBars`; set `InpRequireFractalOutsideAlligator=true` to require its price above the H1 Teeth/Lips area.
 7. H1 AO is rising by default; set `InpRequireAOSign=true` to also require AO above zero, or `InpRequireAOSlope=false` to disable the slope check.
 8. M15 AO is rising only when `InpRequireConfirmAO=true`.
 9. The optional MFI filter passes when `InpUseMfiFilter=true`.
-10. Risk sizing can build a valid order plan, spread is not above `InpMaxSpreadPoints`, and there is no existing same-direction EA position.
+10. Risk sizing can build a valid order plan, spread is not above `InpMaxSpreadPoints`, the optional time filters allow the bar, and the position manager allows exposure (`InpMaxOpenPositions=1`, no pyramiding by default).
 
 A sell entry mirrors the buy logic:
 
 1. H1 Alligator is aligned downward: Lips < Teeth < Jaw; D1 and M15 Alligator filters are configurable with `InpRequireTrendAlligator` and `InpRequireConfirmAlligator`.
-2. H1 close is below the Teeth line by default, or below all three Alligator lines when `InpRequirePriceBeyondAlligator=true`.
+2. H1 close is below all three Alligator lines by default, or only below the Teeth line when `InpRequirePriceBeyondAlligator=false`.
 3. H1 Alligator gap is wide enough.
 4. A confirmed bearish fractal exists within the lookback; its placement below the H1 Teeth/Lips area is required only when `InpRequireFractalOutsideAlligator=true`.
 5. H1 AO is falling by default; AO below zero is required only when `InpRequireAOSign=true`.
 6. M15 AO is falling only when `InpRequireConfirmAO=true`.
-7. MFI, risk, spread, and duplicate-position checks pass.
+7. MFI, risk, spread, time, and exposure checks pass.
+
+
+## Position management
+
+The EA now includes a dedicated position-management layer to reduce repeated blocked order attempts from clusters of same-direction signals:
+
+- `InpMaxOpenPositions=1` limits the EA to one open position on the symbol/magic number by default.
+- `InpAllowPyramiding=false` skips fresh same-direction signals instead of sending orders that the terminal or broker will reject.
+- `InpMaxSameDirectionPositions=1` provides an explicit cap if pyramiding is enabled for optimization.
+- `InpCloseOnOppositeSignal=true` closes an existing opposite EA position when a new Plan A signal appears.
+- `InpReverseOnOppositeSignal=false` makes that opposite-signal close a flat exit by default; set it to `true` to close and immediately attempt a reverse entry.
+- `InpUseAlligatorTrailingStop=true` trails stops toward the Alligator Teeth with `InpTrailingBufferPoints`.
+- `InpUseTimeFilter`, `InpTradeStartHour`, `InpTradeEndHour`, `InpAvoidFridayAfterHour`, and `InpFridayCutoffHour` can be used to avoid unwanted sessions or late-Friday entries.
 
 ## CSV decision log
 
@@ -50,14 +63,14 @@ Important CSV events:
 - `NO_ENTRY`: no trade was opened because at least one mandatory buy and sell filter failed. The `diagnostics` column shows every condition and whether it passed.
 - `ENTRY_SIGNAL`: all strategy filters passed and an order plan was created.
 - `ORDER_SENT`: the MetaTrader trade request was sent successfully.
-- `ORDER_BLOCKED`: a signal existed, but execution was blocked by risk sizing, spread, duplicate position, or terminal order-send failure.
+- `ORDER_BLOCKED`: a signal existed, but execution was blocked by risk sizing, spread, exposure limits, time filter, opposite-signal close without reverse, or terminal order-send failure.
 - `DEAL_EXECUTED`: an actual MetaTrader deal was added for this EA magic number, including entry/exit type, volume, price, profit, order, and position identifiers.
 
 The CSV includes the event reason, full diagnostics, AO values, H1/D1 Alligator values, fractal price/time/shift, and direction.
 
 ## Why trades can be very rare
 
-The original classic setup was intentionally restrictive and could produce only a few trades in multi-year H1 tests. The current defaults relax the most common blockers: the D1 trend filter is optional, M15 confirmation remains optional, price only has to clear the Teeth line, fractals no longer have to sit outside the Alligator, and AO only has to slope in the signal direction. If you want the classic behavior, set `InpRequireTrendAlligator=true`, `InpRequirePriceBeyondAlligator=true`, `InpRequireFractalOutsideAlligator=true`, `InpRequireAOSign=true`, and optionally require the confirmation filters.
+The original classic setup was intentionally restrictive and could produce only a few trades in multi-year H1 tests. The current defaults keep the D1 trend filter optional, M15 confirmation optional, and fractals no longer have to sit outside the Alligator, while price must clear all three Alligator lines and AO must slope in the signal direction. If you want the classic behavior, set `InpRequireTrendAlligator=true`, `InpRequirePriceBeyondAlligator=true`, `InpRequireFractalOutsideAlligator=true`, `InpRequireAOSign=true`, and optionally require the confirmation filters.
 
 The most common reasons for too few trades are:
 
@@ -66,7 +79,7 @@ The most common reasons for too few trades are:
 - the fractal filter remains confirmed 5-bar fractals only, and becomes stricter if `InpRequireFractalOutsideAlligator=true`;
 - AO can be configured from slope-only to sign-and-slope H1 confirmation plus optional M15 AO confirmation;
 - `InpTradeOnNewBarOnly=true` means checks happen only once per H1 bar by default;
-- spread, risk, minimum stop distance, or an existing same-direction position can block execution after a signal.
+- spread, risk, minimum stop distance, time filters, or position exposure limits can block execution after a signal.
 
 Use the CSV `NO_ENTRY` rows to count which exact filter fails most often for the tested symbol and period.
 
