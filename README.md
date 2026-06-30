@@ -14,31 +14,31 @@ This repository contains a MetaTrader 5 Expert Advisor implementing a modular Bi
 - Confirmed 5-bar fractals
 - Optional Market Facilitation Index filter
 - ATR/fractal stop-loss selection and reward-risk take-profit
-- H1 trading timeframe, D1 trend filter, and M15 confirmation by default
+- H1 trading timeframe, optional D1 trend filter, and optional M15 confirmation
 
 ## Entry conditions
 
-A buy entry requires all of these filters to be true on the last closed bar:
+By default the EA now uses a less passive balanced configuration. A buy entry requires these filters to be true on the last closed bar:
 
 1. H1 Alligator is aligned upward: Lips > Teeth > Jaw.
-2. D1 trend Alligator is aligned upward.
-3. M15 confirmation Alligator is aligned upward.
-4. H1 close is above all three Alligator lines.
+2. The D1 trend Alligator agrees only when `InpRequireTrendAlligator=true`; otherwise it is logged diagnostically and can be used during optimization.
+3. The M15 confirmation Alligator agrees only when `InpRequireConfirmAlligator=true`.
+4. H1 close is above the Teeth line by default; set `InpRequirePriceBeyondAlligator=true` to require a close above all three Alligator lines.
 5. H1 Alligator Lips/Jaw gap is at least `InpMinAlligatorGapPts`.
-6. A confirmed bullish fractal exists within `InpFractalLookbackBars` and its price is above the H1 Teeth/Lips area.
-7. H1 AO is positive and rising.
-8. M15 AO is rising.
+6. A confirmed bullish fractal exists within `InpFractalLookbackBars`; set `InpRequireFractalOutsideAlligator=true` to require its price above the H1 Teeth/Lips area.
+7. H1 AO is rising by default; set `InpRequireAOSign=true` to also require AO above zero, or `InpRequireAOSlope=false` to disable the slope check.
+8. M15 AO is rising only when `InpRequireConfirmAO=true`.
 9. The optional MFI filter passes when `InpUseMfiFilter=true`.
 10. Risk sizing can build a valid order plan, spread is not above `InpMaxSpreadPoints`, and there is no existing same-direction EA position.
 
 A sell entry mirrors the buy logic:
 
-1. H1, D1, and M15 Alligators are aligned downward: Lips < Teeth < Jaw.
-2. H1 close is below all three Alligator lines.
+1. H1 Alligator is aligned downward: Lips < Teeth < Jaw; D1 and M15 Alligator filters are configurable with `InpRequireTrendAlligator` and `InpRequireConfirmAlligator`.
+2. H1 close is below the Teeth line by default, or below all three Alligator lines when `InpRequirePriceBeyondAlligator=true`.
 3. H1 Alligator gap is wide enough.
-4. A confirmed bearish fractal exists within the lookback and its price is below the H1 Teeth/Lips area.
-5. H1 AO is negative and falling.
-6. M15 AO is falling.
+4. A confirmed bearish fractal exists within the lookback; its placement below the H1 Teeth/Lips area is required only when `InpRequireFractalOutsideAlligator=true`.
+5. H1 AO is falling by default; AO below zero is required only when `InpRequireAOSign=true`.
+6. M15 AO is falling only when `InpRequireConfirmAO=true`.
 7. MFI, risk, spread, and duplicate-position checks pass.
 
 ## CSV decision log
@@ -57,14 +57,14 @@ The CSV includes the event reason, full diagnostics, AO values, H1/D1 Alligator 
 
 ## Why trades can be very rare
 
-The default setup is intentionally restrictive. A trade is opened only when H1, D1, and M15 trend filters agree, price is on the correct side of the H1 Alligator, AO momentum agrees on H1 and M15, and a confirmed fractal is positioned beyond the Alligator. In a six-year test this can easily reduce the sample to only a few trades, especially on symbols that spend long periods in ranges or have wide spreads.
+The original classic setup was intentionally restrictive and could produce only a few trades in multi-year H1 tests. The current defaults relax the most common blockers: the D1 trend filter is optional, M15 confirmation remains optional, price only has to clear the Teeth line, fractals no longer have to sit outside the Alligator, and AO only has to slope in the signal direction. If you want the classic behavior, set `InpRequireTrendAlligator=true`, `InpRequirePriceBeyondAlligator=true`, `InpRequireFractalOutsideAlligator=true`, `InpRequireAOSign=true`, and optionally require the confirmation filters.
 
 The most common reasons for too few trades are:
 
-- the D1 trend filter disagrees with otherwise valid H1 signals;
-- the M15 confirmation filter flips before or after the H1 signal bar;
-- the fractal filter is very strict because the fractal must be confirmed and also be beyond the Teeth/Lips area;
-- AO must have both the correct sign and slope on H1, while M15 AO must also confirm;
+- the D1 trend filter disagrees with otherwise valid H1 signals when `InpRequireTrendAlligator=true`;
+- the M15 confirmation filter flips before or after the H1 signal bar when confirmation filters are required;
+- the fractal filter remains confirmed 5-bar fractals only, and becomes stricter if `InpRequireFractalOutsideAlligator=true`;
+- AO can be configured from slope-only to sign-and-slope H1 confirmation plus optional M15 AO confirmation;
 - `InpTradeOnNewBarOnly=true` means checks happen only once per H1 bar by default;
 - spread, risk, minimum stop distance, or an existing same-direction position can block execution after a signal.
 
@@ -76,6 +76,10 @@ Recommended inputs to optimize in the MT5 Strategy Tester:
 
 - `InpRiskPerTradePercent`
 - `InpMinAlligatorGapPts`
+- `InpRequireTrendAlligator`
+- `InpRequirePriceBeyondAlligator`
+- `InpRequireFractalOutsideAlligator`
+- `InpRequireAOSign` and `InpRequireAOSlope`
 - `InpFractalLookbackBars`
 - `InpUseMfiFilter` and `InpMfiAveragePeriod`
 - `InpATRPeriod` and `InpATRMultiplier`
