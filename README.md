@@ -110,3 +110,18 @@ Recommended inputs to optimize in the MT5 Strategy Tester:
 - Require breakout beyond the confirming fractal before market entry.
 - Add economic news blackout windows around the killzone/session filter.
 - Train a lightweight ML classifier on AO slope, Alligator gaps, ATR percentile, and fractal age to reject low-quality signals.
+
+## Adaptive quality modules
+
+The EA now keeps the original Plan A logic intact and adds optional, optimizer-friendly modules. All additions are controlled by inputs and default to disabled where they could reduce trade frequency.
+
+- Adaptive flat filter (`InpUseAdaptiveFlatFilter`) blocks entries only when the Alligator lines are close, ATR is below the flat threshold, and recent range confirms consolidation.
+- Trend strength (`InpUseTrendStrengthFilter`) scores Alligator order, line distance, divergence speed, and Lips slope from 0 to 100.
+- Higher-timeframe filter (`InpUseHigherTimeframeFilter`, `InpHigherTimeframe`) can require both HTF Alligator direction and HTF AO confirmation.
+- Enhanced fractal quality (`InpUseEnhancedFractalFilter`) can require fractals outside the Alligator, after Alligator opening, far enough from a previous fractal, and outside a narrow range.
+- ATR volatility filter (`InpUseATRVolatilityFilter`) rejects both low-volatility and excessive-volatility entries.
+- Signal scoring (`InpUseSignalScore`) combines weighted filter results into `SignalScore` from 0 to 100 and opens only above `InpMinSignalScore`.
+- Killzone quality (`InpUseKillzoneQualityFilter`) remains an additional filter only: it can require minimum ATR, tick volume, and bar activity, but it never creates trades by time alone.
+- Trailing stop mode (`InpTrailingMode`) supports off, ATR, Teeth, Fractal, and Hybrid behavior while preserving the existing Alligator trailing toggle.
+
+The CSV log now includes trend strength, ATR in points, Alligator state, SignalScore, and serialized filter parameters so rejected entries can be analyzed without changing the EA code.
